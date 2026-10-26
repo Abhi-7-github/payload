@@ -22,6 +22,7 @@ type BuildPolymorphicJoinWhereArgs = {
   collection: string
   locale?: string
   table: GenericTable
+  useDrafts?: boolean
   where: Where
   wherePlan: PolymorphicJoinWherePlan
 }
@@ -55,6 +56,7 @@ export const buildPolymorphicJoinWhere = ({
   collection,
   locale,
   table,
+  useDrafts,
   where,
   wherePlan,
 }: BuildPolymorphicJoinWhereArgs): SQL | undefined => {
@@ -73,6 +75,7 @@ export const buildPolymorphicJoinWhere = ({
           collection,
           locale,
           table,
+          useDrafts,
           where: nestedWhere,
           wherePlan,
         }),
@@ -91,6 +94,7 @@ export const buildPolymorphicJoinWhere = ({
       collection,
       schemaPath: key,
       table,
+      useDrafts,
       wherePlan,
     })
 
@@ -262,6 +266,7 @@ const resolveWherePath = ({
   collection,
   schemaPath,
   table,
+  useDrafts,
   wherePlan,
 }: {
   schemaPath: string
@@ -306,6 +311,7 @@ const resolveWherePath = ({
         collection,
         pathPlan,
         table,
+        useDrafts,
       }),
       pathPlan,
     }
@@ -323,9 +329,25 @@ const resolveWherePath = ({
     return { type: 'invalid', pathPlan }
   }
 
+  if (schemaPath === 'id') {
+    const idColumn = (useDrafts ? table['parent'] : table['id']) as Column | undefined
+    return {
+      type: 'scalar',
+      column: idColumn ?? sql`null`,
+      fieldContext,
+      pathPlan,
+      queryValueContext,
+    }
+  }
+
+  const columnKey = useDrafts ? `version_${pathPlan.columnPath}` : pathPlan.columnPath
+  const column = fieldContext
+    ? (table[columnKey] ?? (useDrafts ? table[pathPlan.columnPath] : undefined) ?? sql`null`)
+    : sql`null`
+
   return {
     type: 'scalar',
-    column: fieldContext ? table[pathPlan.columnPath] : sql`null`,
+    column,
     fieldContext,
     pathPlan,
     queryValueContext,
@@ -337,11 +359,13 @@ const getHasManySelectExpression = ({
   collection,
   pathPlan,
   table,
+  useDrafts,
 }: {
   adapter: DrizzleAdapter
   collection: string
   pathPlan: WherePathPlan
   table: GenericTable
+  useDrafts?: boolean
 }): string => {
   if (pathPlan.fieldsByCollection.get(collection)?.type !== 'hasManySelect') {
     return adapter.name === 'postgres' ? `'[]'::jsonb` : `'[]'`
@@ -351,7 +375,12 @@ const getHasManySelectExpression = ({
     .split('.')
     .map((pathSegment) => toSnakeCase(pathSegment))
     .join('_')
-  const valuesTableName = adapter.tableNameMap.get(`${toSnakeCase(collection)}_${selectTablePath}`)
+  const prefix = useDrafts
+    ? `_${toSnakeCase(collection)}${adapter.versionsSuffix}_version_`
+    : `${toSnakeCase(collection)}_`
+  const valuesTableName =
+    adapter.tableNameMap.get(`${prefix}${selectTablePath}`) ??
+    adapter.tableNameMap.get(`${toSnakeCase(collection)}_${selectTablePath}`)
 
   if (!valuesTableName) {
     throw new Error(

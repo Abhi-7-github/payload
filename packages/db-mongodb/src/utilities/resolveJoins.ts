@@ -6,7 +6,7 @@ import {
   combineQueries,
   getQueryDraftsSort,
 } from 'payload'
-import { fieldShouldBeLocalized } from 'payload/shared'
+import { fieldShouldBeLocalized, hasDraftsEnabled } from 'payload/shared'
 
 import type { MongooseAdapter } from '../index.js'
 
@@ -21,6 +21,8 @@ export type ResolveJoinsArgs = {
   collectionSlug: string
   /** Array of documents to resolve joins for */
   docs: Record<string, unknown>[]
+  /** Whether drafts are enabled on the top-level query */
+  draftsEnabled?: boolean
   /** Join query specifications (which joins to resolve and how) */
   joins?: JoinQuery
   /** Optional locale for localized queries */
@@ -40,6 +42,7 @@ export async function resolveJoins({
   adapter,
   collectionSlug,
   docs,
+  draftsEnabled = false,
   joins,
   locale,
   projection,
@@ -126,7 +129,9 @@ export async function resolveJoins({
         return null
       }
 
-      const useDrafts = versions && Boolean(targetConfig.versions?.drafts)
+      const useDrafts =
+        Boolean((joinQuery.draft as boolean | undefined) ?? (versions || draftsEnabled)) &&
+        hasDraftsEnabled(targetConfig)
       let JoinModel
       if (useDrafts) {
         JoinModel = adapter.versions[targetConfig.slug]

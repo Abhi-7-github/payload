@@ -395,6 +395,7 @@ export const traverseFields = ({
 
         const {
           count: shouldCount = false,
+          draft: draftJoin,
           limit: limitArg = field.defaultLimit ?? 10,
           page,
           sort = field.defaultSort,
@@ -407,10 +408,13 @@ export const traverseFields = ({
           limit += 1
         }
 
+        const draft = draftJoin ?? Boolean(versions || draftsEnabled)
+
         if (Array.isArray(field.collection)) {
           const polymorphicJoinQuery = buildPolymorphicJoinQuery({
             adapter,
             currentTableName,
+            draft,
             field,
             limit,
             locale,
@@ -418,6 +422,7 @@ export const traverseFields = ({
             path,
             shouldCount,
             sort,
+            versions,
             where,
           })
 
@@ -430,7 +435,7 @@ export const traverseFields = ({
         } else {
           const db = adapter.drizzle as LibSQLDatabase
           const useDrafts =
-            (versions || draftsEnabled) &&
+            draft &&
             hasDraftsEnabled(adapter.payload.collections[field.collection].config)
 
           const fields = useDrafts
