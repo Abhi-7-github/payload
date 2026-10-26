@@ -178,6 +178,7 @@ export type JoinQuery<TSlug extends CollectionSlug = string> =
             [K in keyof TypedCollectionJoins[TSlug]]:
               | {
                   count?: boolean
+                  draft?: boolean
                   limit?: number
                   page?: number
                   sort?: string

@@ -1,6 +1,7 @@
 import type { Column } from 'drizzle-orm'
 
 import { type FlattenedField, getFieldByPath, type Where } from 'payload'
+import { hasDraftsEnabled } from 'payload/shared'
 import toSnakeCase from 'to-snake-case'
 
 import type { DrizzleAdapter, GenericTable } from '../types.js'
@@ -40,10 +41,12 @@ export type PolymorphicJoinWherePlan = Map<string, WherePathPlan>
 export const createPolymorphicJoinWherePlan = ({
   adapter,
   collections,
+  draft,
   where,
 }: {
   adapter: DrizzleAdapter
   collections: string[]
+  draft?: boolean
   where: Where
 }): PolymorphicJoinWherePlan => {
   const collectionContexts = collections.map((collection) => {
@@ -53,14 +56,20 @@ export const createPolymorphicJoinWherePlan = ({
       throw new Error(`Unknown polymorphic join collection "${collection}"`)
     }
 
-    const tableName = adapter.tableNameMap.get(toSnakeCase(collection))
+    const useDrafts = Boolean(draft && hasDraftsEnabled(collectionConfig))
+
+    const tableName = adapter.tableNameMap.get(
+      useDrafts
+        ? `_${toSnakeCase(collection)}${adapter.versionsSuffix}`
+        : toSnakeCase(collection),
+    )
     const table = tableName ? (adapter.tables[tableName] as GenericTable | undefined) : undefined
 
     if (!table) {
       throw new Error(`Polymorphic join collection "${collection}" has no database table`)
     }
 
-    return { collection, collectionConfig, table }
+    return { collection, collectionConfig, table, useDrafts }
   })
   const schemaPathsByColumnPath = new Map<string, Set<string>>()
   const schemaPaths = new Set(getWhereSchemaPaths(where))
@@ -83,14 +92,14 @@ export const createPolymorphicJoinWherePlan = ({
     let hasUnsupportedFieldShape = false
     const scalarQueryValueSignatures = new Set<string>()
 
-    for (const { collection, collectionConfig, table } of collectionContexts) {
+    for (const { collection, collectionConfig, table, useDrafts } of collectionContexts) {
       const fieldAtPath = getFieldByPath({
         fields: collectionConfig.flattenedFields,
         path: schemaPath,
       })
 
       if (schemaPath === 'id') {
-        const idColumn = table['id'] as Column | undefined
+        const idColumn = (useDrafts ? table['parent'] : table['id']) as Column | undefined
 
         if (!idColumn) {
           hasUnsupportedFieldShape = true
@@ -143,7 +152,9 @@ export const createPolymorphicJoinWherePlan = ({
         continue
       }
 
-      const fieldColumn = table[columnPath] as Column | undefined
+      const targetColumnPath = useDrafts ? `version_${columnPath}` : columnPath
+      const fieldColumn = (table[targetColumnPath] ??
+        (useDrafts ? table[columnPath] : undefined)) as Column | undefined
 
       if (!fieldColumn) {
         hasUnsupportedFieldShape = true

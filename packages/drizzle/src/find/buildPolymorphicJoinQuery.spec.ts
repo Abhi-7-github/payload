@@ -43,20 +43,46 @@ const tableWithoutParent = sqliteTable('join_without_parent', {
   id: integer('id').primaryKey(),
 })
 
+const articlesVersionsTable = sqliteTable('_join_articles_v', {
+  id: integer('id').primaryKey(),
+  latest: integer('latest', { mode: 'boolean' }),
+  parent: integer('parent_id'),
+  version_createdAt: text('version_created_at'),
+  version_details_rank: integer('version_details_rank'),
+  version_parent: integer('version_parent_id'),
+  version_score: integer('version_score'),
+  version_title: text('version_title'),
+})
+
 const client: Client = createClient({ url: 'file::memory:' })
 const db = drizzle(client, {
-  schema: { articlesTable, notesTable, parentsTable, tableWithoutID, tableWithoutParent },
+  schema: {
+    articlesTable,
+    articlesVersionsTable,
+    notesTable,
+    parentsTable,
+    tableWithoutID,
+    tableWithoutParent,
+  },
 })
 
 type CollectionFixture = {
   fields: Field[]
   table: GenericTable
+  versions?: { drafts?: boolean }
+  versionsTable?: GenericTable
 }
 
 const createAdapter = (fixtures: Record<string, CollectionFixture>): DrizzleAdapter => {
   const collections: Record<
     string,
-    { config: { fields: Field[]; flattenedFields: ReturnType<typeof flattenAllFields> } }
+    {
+      config: {
+        fields: Field[]
+        flattenedFields: ReturnType<typeof flattenAllFields>
+        versions?: { drafts?: boolean }
+      }
+    }
   > = {}
   const tableNameMap = new Map<string, string>()
   const tables: Record<string, GenericTable> = {}
@@ -68,10 +94,17 @@ const createAdapter = (fixtures: Record<string, CollectionFixture>): DrizzleAdap
       config: {
         fields: fixture.fields,
         flattenedFields: flattenAllFields({ fields: fixture.fields }),
+        versions: fixture.versions,
       },
     }
     tableNameMap.set(toSnakeCase(slug), tableName)
     tables[tableName] = fixture.table
+
+    if (fixture.versionsTable) {
+      const versionsTableName = getTableName(fixture.versionsTable)
+      tableNameMap.set(`_${toSnakeCase(slug)}_v`, versionsTableName)
+      tables[versionsTableName] = fixture.versionsTable
+    }
   }
 
   return {
@@ -89,6 +122,7 @@ const createAdapter = (fixtures: Record<string, CollectionFixture>): DrizzleAdap
     payload: { collections },
     tableNameMap,
     tables,
+    versionsSuffix: '_v',
   } as unknown as DrizzleAdapter
 }
 
@@ -125,32 +159,38 @@ const joinField = {
 
 const buildQuery = ({
   adapter: adapterArg = adapter,
+  draft,
   field = joinField,
   limit = 0,
   page,
   path = '',
   shouldCount = false,
   sort,
+  versions,
   where,
 }: {
   adapter?: DrizzleAdapter
+  draft?: boolean
   field?: FlattenedJoinField
   limit?: number
   page?: number
   path?: string
   shouldCount?: boolean
   sort?: string | string[]
+  versions?: boolean
   where?: Where
 } = {}) =>
   buildPolymorphicJoinQuery({
     adapter: adapterArg,
     currentTableName: getTableName(parentsTable),
+    draft,
     field,
     limit,
     page,
     path,
     shouldCount,
     sort,
+    versions,
     where,
   })
 
@@ -345,5 +385,73 @@ describe('buildPolymorphicJoinQuery', () => {
     expect(() => buildQuery({ adapter: adapterArg, field: singleCollectionField })).toThrow(
       `Polymorphic join collection "articles" has no "${column}" column`,
     )
+  })
+
+  it('uses version table and parent id when draft is enabled on target collection', () => {
+    const draftAdapter = createAdapter({
+      articles: {
+        fields: [
+          { name: 'createdAt', type: 'date' },
+          { name: 'parent', relationTo: 'join-parents', type: 'relationship' },
+          { name: 'title', type: 'text' },
+        ],
+        table: articlesTable,
+        versions: { drafts: true },
+        versionsTable: articlesVersionsTable,
+      },
+      notes: {
+        fields: [
+          { name: 'parent', relationTo: 'join-parents', type: 'relationship' },
+          { name: 'title', type: 'text' },
+        ],
+        table: notesTable,
+      },
+    })
+
+    const query = renderQuery(buildQuery({ adapter: draftAdapter, draft: true }))
+
+    expect(query.sql).toContain('from "_join_articles_v"')
+    expect(query.sql).toContain('from "join_notes"')
+    expect(query.sql).toContain('"latest" = ?')
+    expect(query.sql).toContain('"parent_id" as "id"')
+    expect(query.sql).toContain('"version_parent_id" as "parent"')
+  })
+
+  it('applies where and sort to version columns on draft collection', () => {
+    const draftAdapter = createAdapter({
+      articles: {
+        fields: [
+          { name: 'createdAt', type: 'date' },
+          { name: 'parent', relationTo: 'join-parents', type: 'relationship' },
+          { name: 'score', type: 'number' },
+          { name: 'title', type: 'text' },
+        ],
+        table: articlesTable,
+        versions: { drafts: true },
+        versionsTable: articlesVersionsTable,
+      },
+      notes: {
+        fields: [
+          { name: 'parent', relationTo: 'join-parents', type: 'relationship' },
+          { name: 'title', type: 'text' },
+        ],
+        table: notesTable,
+      },
+    })
+
+    const query = renderQuery(
+      buildQuery({
+        adapter: draftAdapter,
+        draft: true,
+        sort: 'score',
+        where: {
+          title: { equals: 'draft-item' },
+        },
+      }),
+    )
+
+    expect(query.sql).toContain('"version_score" as "sortPath"')
+    expect(query.sql).toContain('"version_title" = ?')
+    expect(query.sql).toContain('"title" = ?')
   })
 })

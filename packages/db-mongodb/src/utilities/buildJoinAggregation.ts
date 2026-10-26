@@ -79,6 +79,7 @@ export const buildJoinAggregation = async ({
 
     const {
       count = false,
+      draft: draftJoin,
       limit: limitJoin = join.field.defaultLimit ?? 10,
       page,
       sort: sortJoin = join.field.defaultSort || collectionConfig.defaultSort,
@@ -105,13 +106,6 @@ export const buildJoinAggregation = async ({
       timestamps: true,
     })
 
-    const $match = await buildQuery({
-      adapter,
-      fields: aggregatedFields,
-      locale,
-      where: whereJoin,
-    })
-
     const sortProperty = Object.keys(sort)[0]! // assert because buildSortParam always returns at least 1 key.
     const sortDirection = sort[sortProperty] === 'asc' ? 1 : -1
 
@@ -124,6 +118,31 @@ export const buildJoinAggregation = async ({
     for (const collectionSlug of join.field.collection) {
       const alias = `${as}.docs.${collectionSlug}`
       aliases.push(alias)
+
+      const { collectionConfig, Model: JoinModel } = getCollection({ adapter, collectionSlug })
+      const useDrafts = Boolean(
+        (draftJoin ?? (draftsEnabled || versions)) && hasDraftsEnabled(collectionConfig),
+      )
+
+      const TargetModel = useDrafts ? adapter.versions[collectionSlug] : JoinModel
+
+      if (!TargetModel) {
+        continue
+      }
+
+      const foreignField = useDrafts ? `version.${join.field.on}` : join.field.on
+
+      const collectionMatch = await TargetModel.buildQuery({
+        locale,
+        payload: adapter.payload,
+        where: useDrafts
+          ? combineQueries(appendVersionToQueryKey(whereJoin), {
+              latest: {
+                equals: true,
+              },
+            })
+          : whereJoin,
+      })
 
       const basePipeline = [
         {
@@ -138,29 +157,33 @@ export const buildJoinAggregation = async ({
             $and: [
               {
                 $expr: {
-                  $eq: [`$${join.field.on}`, '$$root_id_'],
+                  $eq: [`$${foreignField}`, '$$root_id_'],
                 },
               },
-              $match,
+              collectionMatch,
             ],
           },
         },
       ]
 
-      const { Model: JoinModel } = getCollection({ adapter, collectionSlug })
+      const isTopLevel =
+        sortProperty === 'createdAt' || sortProperty === 'updatedAt' || sortProperty === '_id'
+      const sortKey = useDrafts && !isTopLevel ? `version.${sortProperty}` : sortProperty
+      const sortFieldPath =
+        useDrafts && !isTopLevel ? `$version.${sortProperty}` : `$${sortProperty}`
 
       aggregate.push({
         $lookup: {
           as: alias,
-          from: JoinModel.collection.name,
+          from: TargetModel.collection.name,
           let: {
-            root_id_: '$_id',
+            root_id_: versions ? '$parent' : '$_id',
           },
           pipeline: [
             ...basePipeline,
             {
               $sort: {
-                [sortProperty]: sortDirection,
+                [sortKey]: sortDirection,
               },
             },
             {
@@ -169,9 +192,9 @@ export const buildJoinAggregation = async ({
             },
             {
               $project: {
-                value: '$_id',
+                value: useDrafts ? '$parent' : '$_id',
                 ...(projectSort && {
-                  [sortProperty]: 1,
+                  [sortProperty]: sortFieldPath,
                 }),
                 relationTo: 1,
               },
@@ -184,9 +207,9 @@ export const buildJoinAggregation = async ({
         aggregate.push({
           $lookup: {
             as: `${as}.totalDocs.${alias}`,
-            from: JoinModel.collection.name,
+            from: TargetModel.collection.name,
             let: {
-              root_id_: '$_id',
+              root_id_: versions ? '$parent' : '$_id',
             },
             pipeline: [
               ...basePipeline,
@@ -281,9 +304,20 @@ export const buildJoinAggregation = async ({
         )
       }
 
+      const {
+        count,
+        draft: draftJoin,
+        limit: limitJoin = join.field.defaultLimit ?? 10,
+        page,
+        sort: sortJoin = join.field.defaultSort || collectionConfig.defaultSort,
+        where: whereJoin = {},
+      } = joins?.[join.joinPath] || {}
+
       let JoinModel: CollectionModel | undefined
 
-      const useDrafts = (draftsEnabled || versions) && hasDraftsEnabled(collectionConfig)
+      const useDrafts = Boolean(
+        (draftJoin ?? (draftsEnabled || versions)) && hasDraftsEnabled(collectionConfig),
+      )
 
       if (useDrafts) {
         JoinModel = adapter.versions[collectionConfig.slug]
@@ -294,14 +328,6 @@ export const buildJoinAggregation = async ({
       if (!JoinModel) {
         throw new APIError(`Join Model was not found for ${collectionConfig.slug}`)
       }
-
-      const {
-        count,
-        limit: limitJoin = join.field.defaultLimit ?? 10,
-        page,
-        sort: sortJoin = join.field.defaultSort || collectionConfig.defaultSort,
-        where: whereJoin = {},
-      } = joins?.[join.joinPath] || {}
 
       if (Array.isArray(join.field.collection)) {
         throw new Error('Unreachable')
